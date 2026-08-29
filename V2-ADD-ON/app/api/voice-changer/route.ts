@@ -109,30 +109,32 @@ export async function POST(req: Request) {
 
     // Step 1: speech-to-text. The audio is converted to text first because
     // Gemini TTS is a text-to-audio model, not a direct voice-cloning model.
-    const transcriptResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${TRANSCRIBE_MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-  contents: [
-    {
-      parts: [
+   const transcriptResponse = await fetch(
+  `https://generativelanguage.googleapis.com/v1beta/models/${TRANSCRIBE_MODEL}:generateContent?key=${apiKey}`,
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [
         {
-          text:
-            "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
-        },
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Audio,
-          },
+          parts: [
+            {
+              text:
+                "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
+            },
+            {
+              inline_data: {
+                mime_type: mimeType,
+                data: base64Audio,
+             },
+          ],
         },
       ],
-    },
-  ],
-}),
-        if (!transcriptResponse.ok) {
+    }),
+  }
+);       if (!transcriptResponse.ok) {
       return jsonError(
         "Audio tidak dapat dibaca.",
         transcriptResponse.status,
