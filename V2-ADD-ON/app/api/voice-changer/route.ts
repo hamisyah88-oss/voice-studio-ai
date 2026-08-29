@@ -165,12 +165,6 @@ console.log(
   JSON.stringify(transcriptData, null, 2)
 );
 
-const transcriptData = await transcriptResponse.json();
-
-console.log(
-  "GEMINI TRANSCRIPTION RESPONSE:",
-  JSON.stringify(transcriptData, null, 2)
-);
 
 const transcript = transcriptData?.candidates?.[0]?.content?.parts
   ?.map((part: { text?: string }) => part.text || "")
