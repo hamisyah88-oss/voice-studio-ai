@@ -3,11 +3,15 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 const TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+const FALLBACK_TRANSCRIBE_MODEL = "gemini-2.5-flash";
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
 const TARGET_VOICES: Record<
   string,
-  { voice: string; direction: string }
+  {
+    voice: string;
+    direction: string;
+  }
 > = {
   guru_wanita: {
     voice: "Leda",
@@ -78,6 +82,11 @@ function jsonError(
   );
 }
 
+/**
+ * Gemini TTS mengembalikan raw PCM.
+ * Fungsi ini membungkus PCM menjadi WAV agar browser
+ * dapat langsung memutar hasilnya.
+ */
 function pcmToWavBuffer(
   pcm: Buffer,
   sampleRate = 24000,
@@ -111,35 +120,53 @@ function pcmToWavBuffer(
 }
 
 /**
+ * Ambil teks dari response generateContent.
+ */
+function extractText(data: any): string {
+  return (
+    data?.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: string }) => part?.text || "")
+      .join("")
+      .trim() || ""
+  );
+}
+
+/**
  * Upload audio ke Gemini Files API.
  *
- * Gemini merekomendasikan Files API untuk audio,
- * kemudian file URI digunakan untuk transkripsi.
+ * Penting:
+ * Kita TIDAK mengirim Buffer langsung sebagai fetch body.
+ * Buffer dikonversi menjadi Uint8Array supaya TypeScript/Vercel
+ * tidak memunculkan error BodyInit.
  */
 async function uploadAudioToGemini(
   audioBuffer: Buffer,
   mimeType: string,
   apiKey: string
-) {
-  const uploadUrl =
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`;
+): Promise<string> {
+  const uploadStartUrl =
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(
+      apiKey
+    )}`;
 
-  // STEP 1
-  // Memulai resumable upload.
-  const startResponse = await fetch(uploadUrl, {
+  /**
+   * STEP 1
+   * Memulai resumable upload.
+   */
+  const startResponse = await fetch(uploadStartUrl, {
     method: "POST",
     headers: {
+      "Content-Type": "application/json",
       "X-Goog-Upload-Protocol": "resumable",
       "X-Goog-Upload-Command": "start",
       "X-Goog-Upload-Header-Content-Length": String(
-        audioBuffer.length
+        audioBuffer.byteLength
       ),
       "X-Goog-Upload-Header-Content-Type": mimeType,
-      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       file: {
-        display_name: "voice-studio-input",
+        display_name: `voice-input-${Date.now()}`,
       },
     }),
   });
@@ -153,34 +180,46 @@ async function uploadAudioToGemini(
     });
 
     throw new Error(
-      `Gagal memulai upload audio ke Gemini (${startResponse.status}).`
+      `Gemini gagal memulai upload audio (${startResponse.status}). ${errorText}`
     );
   }
 
-  const uploadUrlFromHeader =
-    startResponse.headers.get("x-goog-upload-url");
+  /**
+   * Gemini mengirim URL upload melalui header.
+   */
+  const uploadUrl =
+    startResponse.headers.get("x-goog-upload-url") ||
+    startResponse.headers.get("X-Goog-Upload-URL");
 
-  if (!uploadUrlFromHeader) {
+  if (!uploadUrl) {
     throw new Error(
-      "Gemini tidak memberikan upload URL."
+      "Gemini tidak mengembalikan URL upload audio."
     );
   }
 
-  // STEP 2
-  // Mengirim binary audio.
-  const uploadResponse = await fetch(
-    uploadUrlFromHeader,
-    {
-      method: "POST",
-      headers: {
-        "Content-Length": String(audioBuffer.length),
-        "X-Goog-Upload-Offset": "0",
-        "X-Goog-Upload-Command": "upload, finalize",
-        "Content-Type": mimeType,
-      },
-      body: audioBuffer,
-    }
+  /**
+   * STEP 2
+   * Upload byte audio sebenarnya.
+   *
+   * Buffer -> Uint8Array
+   * agar kompatibel dengan BodyInit pada Vercel/Next.js.
+   */
+  const uploadBody = new Uint8Array(
+    audioBuffer.buffer,
+    audioBuffer.byteOffset,
+    audioBuffer.byteLength
   );
+
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "Content-Length": String(uploadBody.byteLength),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+      "Content-Type": mimeType,
+    },
+    body: uploadBody,
+  });
 
   if (!uploadResponse.ok) {
     const errorText = await uploadResponse.text();
@@ -191,7 +230,7 @@ async function uploadAudioToGemini(
     });
 
     throw new Error(
-      `Gagal upload audio ke Gemini (${uploadResponse.status}).`
+      `Gemini gagal mengupload audio (${uploadResponse.status}). ${errorText}`
     );
   }
 
@@ -206,55 +245,47 @@ async function uploadAudioToGemini(
 
   if (!fileUri) {
     throw new Error(
-      "Gemini tidak mengembalikan URI file audio."
+      "Gemini menerima upload tetapi tidak memberikan file URI."
     );
   }
 
-  return {
-    uri: fileUri,
-    mimeType:
-      fileData?.file?.mimeType ||
-      fileData?.file?.mime_type ||
-      mimeType,
-  };
+  return fileUri;
 }
 
 /**
  * Transkripsi menggunakan Gemini 3.5 Transcribe.
- *
- * Alurnya:
- * audio -> Files API -> file URI
- * -> Interactions API -> transcript
  */
-async function transcribeAudio(
+async function transcribeWithGemini35(
   fileUri: string,
   mimeType: string,
   apiKey: string
-) {
+): Promise<string> {
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    `https://generativelanguage.googleapis.com/v1beta/models/${TRANSCRIBE_MODEL}:generateContent?key=${encodeURIComponent(
+      apiKey
+    )}`,
     {
       method: "POST",
       headers: {
-        "x-goog-api-key": apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: TRANSCRIBE_MODEL,
-
-        input: [
+        contents: [
           {
-            type: "audio",
-            uri: fileUri,
-            mime_type: mimeType,
+            parts: [
+              {
+                fileData: {
+                  fileUri,
+                  mimeType,
+                },
+              },
+            ],
           },
         ],
 
-        generation_config: {
-          transcription_config: {
-            language_codes: ["id-ID"],
-
-            mode: "verbatim",
+        generationConfig: {
+          audioTranscriptionConfig: {
+            languageCodes: ["id-ID"],
           },
         },
       }),
@@ -264,18 +295,18 @@ async function transcribeAudio(
   const responseText = await response.text();
 
   console.log(
-    "GEMINI TRANSCRIBE STATUS:",
+    "GEMINI 3.5 TRANSCRIBE STATUS:",
     response.status
   );
 
   console.log(
-    "GEMINI TRANSCRIBE RESPONSE:",
+    "GEMINI 3.5 TRANSCRIBE RESPONSE:",
     responseText
   );
 
   if (!response.ok) {
     throw new Error(
-      `Gemini transcription gagal (${response.status}): ${responseText}`
+      `Gemini 3.5 Transcribe error ${response.status}: ${responseText}`
     );
   }
 
@@ -285,86 +316,107 @@ async function transcribeAudio(
     data = JSON.parse(responseText);
   } catch {
     throw new Error(
-      "Respons transkripsi Gemini bukan JSON yang valid."
+      "Response Gemini 3.5 bukan JSON yang valid."
     );
   }
 
-  /**
-   * Dokumentasi terbaru menyediakan output_text
-   * sebagai transcript utama.
-   */
-  let transcript =
-    typeof data?.output_text === "string"
-      ? data.output_text.trim()
-      : "";
+  return extractText(data);
+}
 
-  /**
-   * Fallback jika struktur respons berbeda.
-   */
-  if (!transcript) {
-    const possibleSteps = Array.isArray(data?.steps)
-      ? data.steps
-      : [];
+/**
+ * Fallback:
+ * Gemini 2.5 Flash membaca audio melalui fileData.
+ */
+async function transcribeWithGemini25(
+  fileUri: string,
+  mimeType: string,
+  apiKey: string
+): Promise<string> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${FALLBACK_TRANSCRIBE_MODEL}:generateContent?key=${encodeURIComponent(
+      apiKey
+    )}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text:
+                  "Transkripsikan seluruh ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang benar-benar diucapkan. Jangan menjelaskan audio. Jangan membuat ringkasan. Hanya keluarkan teks ucapan.",
+              },
+              {
+                fileData: {
+                  fileUri,
+                  mimeType,
+                },
+              },
+            ],
+          },
+        ],
 
-    for (const step of possibleSteps) {
-      const contents = Array.isArray(step?.content)
-        ? step.content
-        : [];
-
-      for (const content of contents) {
-        if (
-          content?.type === "text" &&
-          typeof content?.text === "string"
-        ) {
-          transcript += `${content.text} `;
-        }
-
-        if (
-          typeof content?.text === "string"
-        ) {
-          transcript += `${content.text} `;
-        }
-      }
+        generationConfig: {
+          temperature: 0,
+        },
+      }),
     }
+  );
 
-    transcript = transcript.trim();
-  }
+  const responseText = await response.text();
 
-  if (!transcript) {
+  console.log(
+    "GEMINI 2.5 FALLBACK STATUS:",
+    response.status
+  );
+
+  console.log(
+    "GEMINI 2.5 FALLBACK RESPONSE:",
+    responseText
+  );
+
+  if (!response.ok) {
     throw new Error(
-      "Gemini menerima file audio tetapi tidak menghasilkan teks transkripsi."
+      `Gemini 2.5 Flash error ${response.status}: ${responseText}`
     );
   }
 
-  return transcript;
+  let data: any;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      "Response Gemini 2.5 bukan JSON yang valid."
+    );
+  }
+
+  return extractText(data);
 }
 
 export async function POST(req: Request) {
   try {
-    // =========================================================
-    // 1. API KEY
-    // =========================================================
-
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return jsonError(
-        "GEMINI_API_KEY belum dipasang.",
+        "GEMINI_API_KEY belum dipasang di Vercel.",
         500
       );
     }
 
-    // =========================================================
-    // 2. FORM DATA
-    // =========================================================
-
+    /**
+     * Ambil FormData.
+     */
     const incoming = await req.formData();
 
     const audio = incoming.get("audio");
 
     const targetVoice = String(
-      incoming.get("targetVoice") ||
-        "guru_wanita"
+      incoming.get("targetVoice") || "guru_wanita"
     );
 
     if (!(audio instanceof File)) {
@@ -374,16 +426,6 @@ export async function POST(req: Request) {
       );
     }
 
-    console.log("AUDIO INFO:", {
-      name: audio.name,
-      type: audio.type,
-      size: audio.size,
-    });
-
-    // =========================================================
-    // 3. VALIDASI FILE
-    // =========================================================
-
     if (audio.size === 0) {
       return jsonError(
         "File audio kosong.",
@@ -391,18 +433,14 @@ export async function POST(req: Request) {
       );
     }
 
-    if (
-      audio.size >
-      50 * 1024 * 1024
-    ) {
+    if (audio.size > 50 * 1024 * 1024) {
       return jsonError(
         "File terlalu besar. Maksimal 50 MB.",
         400
       );
     }
 
-    const target =
-      TARGET_VOICES[targetVoice];
+    const target = TARGET_VOICES[targetVoice];
 
     if (!target) {
       return jsonError(
@@ -411,82 +449,151 @@ export async function POST(req: Request) {
       );
     }
 
-    // =========================================================
-    // 4. BACA AUDIO
-    // =========================================================
-
-    const arrayBuffer =
-      await audio.arrayBuffer();
-
-    const audioBuffer =
-      Buffer.from(arrayBuffer);
-
     /**
-     * Pertahankan MIME asli.
-     * Jangan lagi memaksa semua file menjadi audio/wav.
+     * MIME audio.
      */
     let mimeType =
-      (audio.type || "").split(";")[0].toLowerCase();
+      (audio.type || "audio/wav")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
 
-    if (!mimeType) {
+    /**
+     * Gemini Transcribe mendukung format audio tertentu.
+     */
+    const supportedMimeTypes = [
+      "audio/wav",
+      "audio/x-wav",
+      "audio/mp3",
+      "audio/mpeg",
+      "audio/aiff",
+      "audio/aac",
+      "audio/ogg",
+      "audio/flac",
+    ];
+
+    /**
+     * Normalisasi beberapa MIME umum.
+     */
+    if (mimeType === "audio/x-wav") {
       mimeType = "audio/wav";
     }
 
-    console.log("AUDIO MIME TYPE:", mimeType);
+    if (mimeType === "audio/mpeg") {
+      mimeType = "audio/mp3";
+    }
 
-    // =========================================================
-    // 5. UPLOAD KE GEMINI FILES API
-    // =========================================================
+    console.log("AUDIO INFO:", {
+      name: audio.name,
+      size: audio.size,
+      type: audio.type,
+      mimeType,
+    });
 
-    const uploadedFile =
-      await uploadAudioToGemini(
-        audioBuffer,
-        mimeType,
-        apiKey
-      );
-
-    console.log(
-      "GEMINI AUDIO FILE URI:",
-      uploadedFile.uri
-    );
-
-    // =========================================================
-    // 6. TRANSKRIPSI
-    // =========================================================
-
-    let transcript: string;
-
-    try {
-      transcript =
-        await transcribeAudio(
-          uploadedFile.uri,
-          uploadedFile.mimeType,
-          apiKey
-        );
-    } catch (error) {
-      console.error(
-        "TRANSCRIPTION ERROR:",
-        error
-      );
-
+    /**
+     * Browser MediaRecorder sering menghasilkan audio/webm.
+     *
+     * Gemini Audio Transcription mendokumentasikan WAV, MP3,
+     * AIFF, AAC, OGG Vorbis, dan FLAC.
+     */
+    if (!supportedMimeTypes.includes(mimeType)) {
       return jsonError(
-        "Gemini gagal mentranskripsikan audio.",
-        422,
-        error instanceof Error
-          ? error.message
-          : String(error)
+        `Format audio "${mimeType}" belum didukung oleh jalur transkripsi ini. Gunakan WAV, MP3, AAC, OGG, FLAC, atau AIFF.`,
+        415,
+        `File: ${audio.name}`
       );
     }
 
-    console.log(
-      "FINAL TRANSCRIPT:",
-      transcript
+    /**
+     * Baca audio.
+     */
+    const arrayBuffer = await audio.arrayBuffer();
+
+    const audioBuffer = Buffer.from(arrayBuffer);
+
+    console.log("AUDIO BUFFER:", {
+      bytes: audioBuffer.length,
+      mimeType,
+    });
+
+    /**
+     * =========================================================
+     * STEP 1 — UPLOAD AUDIO KE GEMINI FILES API
+     * =========================================================
+     */
+    const fileUri = await uploadAudioToGemini(
+      audioBuffer,
+      mimeType,
+      apiKey
     );
 
-    // =========================================================
-    // 7. TEXT TO SPEECH
-    // =========================================================
+    console.log("GEMINI FILE URI:", fileUri);
 
+    /**
+     * =========================================================
+     * STEP 2 — SPEECH TO TEXT
+     * =========================================================
+     *
+     * Utama:
+     * Gemini 3.5 Transcribe
+     *
+     * Fallback:
+     * Gemini 2.5 Flash
+     */
+    let transcript = "";
+
+    try {
+      transcript = await transcribeWithGemini35(
+        fileUri,
+        mimeType,
+        apiKey
+      );
+    } catch (error) {
+      console.error(
+        "GEMINI 3.5 TRANSCRIBE FAILED:",
+        error
+      );
+    }
+
+    /**
+     * Kalau Gemini 3.5 tidak menghasilkan teks,
+     * coba Gemini 2.5 Flash.
+     */
+    if (!transcript) {
+      console.log(
+        "Gemini 3.5 tidak menghasilkan transcript. Menggunakan fallback Gemini 2.5 Flash..."
+      );
+
+      try {
+        transcript = await transcribeWithGemini25(
+          fileUri,
+          mimeType,
+          apiKey
+        );
+      } catch (error) {
+        console.error(
+          "GEMINI 2.5 FALLBACK FAILED:",
+          error
+        );
+      }
+    }
+
+    transcript = transcript.trim();
+
+    console.log("FINAL TRANSCRIPT:", transcript);
+
+    if (!transcript) {
+      return jsonError(
+        "Gemini menerima file audio tetapi tidak menemukan ucapan. Pastikan file berupa WAV/MP3/AAC/OGG/FLAC/AIFF dan berisi suara manusia yang jelas.",
+        422
+      );
+    }
+
+    /**
+     * =========================================================
+     * STEP 3 — TEXT TO SPEECH
+     * =========================================================
+     */
     const ttsPrompt = `
 Bacakan teks berikut dalam bahasa Indonesia.
 
@@ -494,193 +601,196 @@ Karakter suara:
 ${target.direction}
 
 Instruksi:
-- Pertahankan isi dan urutan kata.
+- Pertahankan seluruh isi teks.
+- Jangan mengubah kata.
 - Jangan menambahkan kata pembuka.
 - Jangan menambahkan kata penutup.
-- Jangan mengubah makna.
+- Jangan menjelaskan teks.
 - Jangan menyanyikan teks.
 - Gunakan intonasi natural.
-- Ucapkan dengan jelas.
-- Gunakan jeda yang wajar.
+- Artikulasi harus jelas.
+- Jangan terdengar seperti robot.
 
-Teks:
+Teks yang harus dibacakan:
+
 ${transcript}
 `.trim();
 
-    const ttsResponse =
-      await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
+    const ttsResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${encodeURIComponent(
+        apiKey
+      )}`,
+      {
+        method: "POST",
 
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
+        headers: {
+          "Content-Type": "application/json",
+        },
 
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: ttsPrompt,
-                  },
-                ],
-              },
-            ],
-
-            generationConfig: {
-              responseModalities: [
-                "AUDIO",
-              ],
-
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName:
-                      target.voice,
-                  },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: ttsPrompt,
                 },
-
-                languageCode: "id-ID",
-              },
+              ],
             },
-          }),
-        }
-      );
+          ],
+
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: target.voice,
+                },
+              },
+
+              languageCode: "id-ID",
+            },
+          },
+        }),
+      }
+    );
+
+    const ttsResponseText = await ttsResponse.text();
+
+    console.log(
+      "GEMINI TTS STATUS:",
+      ttsResponse.status
+    );
 
     if (!ttsResponse.ok) {
-      const errorText =
-        await ttsResponse.text();
-
       console.error(
         "GEMINI TTS ERROR:",
-        {
-          status:
-            ttsResponse.status,
-          response:
-            errorText,
-        }
+        ttsResponseText
       );
 
       return jsonError(
         "Suara tujuan gagal dibuat.",
         ttsResponse.status,
-        errorText
+        ttsResponseText
       );
     }
 
-    // =========================================================
-    // 8. PARSE TTS RESPONSE
-    // =========================================================
+    let ttsData: any;
 
-    const ttsData =
-      await ttsResponse.json();
+    try {
+      ttsData = JSON.parse(ttsResponseText);
+    } catch {
+      return jsonError(
+        "Response Gemini TTS bukan JSON yang valid.",
+        502,
+        ttsResponseText
+      );
+    }
 
     console.log(
       "GEMINI TTS RESPONSE:",
-      JSON.stringify(
-        ttsData,
-        null,
-        2
-      )
+      JSON.stringify(ttsData, null, 2)
     );
 
+    /**
+     * Cari bagian audio.
+     */
     const audioPart =
-      ttsData?.candidates?.[0]
-        ?.content?.parts?.find(
-          (part: any) =>
-            part?.inlineData?.data ||
-            part?.inline_data?.data
-        );
-
-    if (!audioPart) {
-      return jsonError(
-        "Gemini tidak mengembalikan audio hasil suara.",
-        502
+      ttsData?.candidates?.[0]?.content?.parts?.find(
+        (part: any) =>
+          part?.inlineData?.data ||
+          part?.inline_data?.data
       );
-    }
 
     const inlineData =
-      audioPart.inlineData ||
-      audioPart.inline_data;
+      audioPart?.inlineData ||
+      audioPart?.inline_data;
 
     if (!inlineData?.data) {
       return jsonError(
-        "Data audio hasil Gemini kosong.",
-        502
+        "Server tidak menerima audio hasil dari mesin suara.",
+        502,
+        JSON.stringify(ttsData)
       );
     }
 
-    // =========================================================
-    // 9. PCM -> WAV
-    // =========================================================
-
+    /**
+     * MIME output Gemini.
+     */
     const outputMime = String(
       inlineData.mimeType ||
         inlineData.mime_type ||
         "audio/L16;rate=24000"
     );
 
-    const outputPcm =
-      Buffer.from(
-        inlineData.data,
-        "base64"
-      );
-
-    const sampleRateMatch =
-      outputMime.match(
-        /rate=(\d+)/i
-      );
-
-    const sampleRate =
-      sampleRateMatch
-        ? Number(
-            sampleRateMatch[1]
-          )
-        : 24000;
-
-    const wav =
-      pcmToWavBuffer(
-        outputPcm,
-        sampleRate
-      );
-
-    // =========================================================
-    // 10. RETURN AUDIO
-    // =========================================================
-
-    return new NextResponse(
-      wav,
-      {
-        status: 200,
-
-        headers: {
-          "Content-Type":
-            "audio/wav",
-
-          "Content-Length":
-            String(wav.length),
-
-          "Content-Disposition":
-            'inline; filename="voice-to-voice.wav"',
-
-          "Cache-Control":
-            "no-store",
-
-          "X-Voice-Target":
-            targetVoice,
-
-          "X-Transcript":
-            encodeURIComponent(
-              transcript
-            ),
-        },
-      }
+    /**
+     * PCM hasil TTS.
+     */
+    const outputPcm = Buffer.from(
+      inlineData.data,
+      "base64"
     );
+
+    /**
+     * Ambil sample rate dari MIME.
+     */
+    const sampleRateMatch =
+      outputMime.match(/rate=(\d+)/i);
+
+    const sampleRate = sampleRateMatch
+      ? Number(sampleRateMatch[1])
+      : 24000;
+
+    /**
+     * PCM -> WAV.
+     */
+    const wav = pcmToWavBuffer(
+      outputPcm,
+      sampleRate,
+      1,
+      16
+    );
+
+    console.log("FINAL WAV:", {
+      bytes: wav.length,
+      sampleRate,
+      transcript,
+      targetVoice,
+    });
+
+    /**
+     * =========================================================
+     * RESPONSE
+     * =========================================================
+     */
+    return new NextResponse(wav, {
+      status: 200,
+
+      headers: {
+        "Content-Type": "audio/wav",
+
+        "Content-Length": String(
+          wav.length
+        ),
+
+        "Content-Disposition":
+          'inline; filename="voice-to-voice.wav"',
+
+        "Cache-Control": "no-store",
+
+        "X-Voice-Target": targetVoice,
+
+        /**
+         * Supaya frontend bisa mengetahui transcript
+         * jika diperlukan.
+         */
+        "X-Transcript":
+          encodeURIComponent(transcript),
+      },
+    });
   } catch (error) {
     console.error(
-      "VOICE CHANGER ERROR:",
+      "VOICE CHANGER SERVER ERROR:",
       error
     );
 
