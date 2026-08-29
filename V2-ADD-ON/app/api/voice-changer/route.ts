@@ -274,7 +274,7 @@ async function transcribeAudio(
   fileUri: string,
   mimeType: string,
   apiKey: string
-) {
+): Promise<string> {
   console.log("START GEMINI TRANSCRIPTION:", {
     fileUri,
     mimeType,
@@ -285,15 +285,12 @@ async function transcribeAudio(
     "https://generativelanguage.googleapis.com/v1beta/interactions",
     {
       method: "POST",
-
       headers: {
-        "x-goog-api-key": apiKey,
         "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
       },
-
       body: JSON.stringify({
         model: TRANSCRIBE_MODEL,
-
         input: [
           {
             type: "audio",
@@ -301,45 +298,29 @@ async function transcribeAudio(
             mime_type: mimeType,
           },
         ],
-
-        generation_config: {
-          transcription_config: {
-            language_codes: ["id-ID"],
-
-            mode: "smart",
-          },
-        },
       }),
     }
   );
 
-  const responseText = await response.text();
+  console.log(
+    "GEMINI TRANSCRIPTION HTTP STATUS:",
+    response.status
+  );
 
-  console.log("GEMINI TRANSCRIPTION HTTP STATUS:", response.status);
-
-  if (!response.ok) {
-    console.error(
-      "GEMINI TRANSCRIPTION ERROR:",
-      responseText
-    );
-
-    throw new Error(
-      `Gemini gagal membaca audio (${response.status}). ${responseText}`
-    );
-  }
+  const rawText = await response.text();
 
   let data: any;
 
   try {
-    data = JSON.parse(responseText);
+    data = JSON.parse(rawText);
   } catch {
     console.error(
       "GEMINI TRANSCRIPTION INVALID JSON:",
-      responseText
+      rawText
     );
 
     throw new Error(
-      "Gemini mengembalikan respons yang bukan JSON."
+      "Gemini mengembalikan response yang bukan JSON."
     );
   }
 
@@ -348,14 +329,136 @@ async function transcribeAudio(
     JSON.stringify(data, null, 2)
   );
 
+  if (!response.ok) {
+    const message =
+      data?.error?.message ||
+      data?.message ||
+      rawText ||
+      "Unknown Gemini error";
+
+    throw new Error(
+      `Gemini transcription gagal (${response.status}): ${message}`
+    );
+  }
+
+  /*
+   * Gemini 3.5 Transcribe / Interactions API
+   *
+   * Response:
+   * steps[]
+   *   -> type: "model_output"
+   *   -> content[]
+   *      -> type: "text"
+   *      -> text: "..."
+   */
+
+  const transcriptParts: string[] = [];
+
+  if (Array.isArray(data?.steps)) {
+    for (const step of data.steps) {
+      if (!Array.isArray(step?.content)) continue;
+
+      for (const content of step.content) {
+        if (
+          content?.type === "text" &&
+          typeof content?.text === "string"
+        ) {
+          const text = content.text.trim();
+
+          if (text) {
+            transcriptParts.push(text);
+          }
+        }
+      }
+    }
+  }
+
+  /*
+   * Fallback jika SDK/API mengembalikan output_text.
+   */
+  if (
+    transcriptParts.length === 0 &&
+    typeof data?.output_text === "string"
+  ) {
+    const text = data.output_text.trim();
+
+    if (text) {
+      transcriptParts.push(text);
+    }
+  }
+
+  const transcript = transcriptParts.join(" ").trim();
+
+  console.log(
+    "FINAL TRANSCRIPT:",
+    transcript
+  );
+
+  if (!transcript) {
+    throw new Error(
+      "Gemini berhasil memproses audio tetapi tidak menghasilkan teks transkripsi."
+    );
+  }
+
+  return transcript;
+}
+
   // ============================================================
   // HASIL UTAMA — INTERACTIONS API
   // ============================================================
+// ============================================================
+// AMBIL HASIL TRANSKRIP DARI RESPONSE GEMINI
+// ============================================================
 
-  let transcript =
-    typeof data?.output_text === "string"
-      ? data.output_text.trim()
-      : "";
+let transcript = "";
+
+// Format output_text
+if (typeof data?.output_text === "string") {
+  transcript = data.output_text.trim();
+}
+
+// Format Gemini Interactions API:
+// steps -> content -> text
+if (!transcript && Array.isArray(data?.steps)) {
+  const texts: string[] = [];
+
+  for (const step of data.steps) {
+    if (!Array.isArray(step?.content)) continue;
+
+    for (const content of step.content) {
+      if (
+        content &&
+        typeof content.text === "string" &&
+        content.text.trim()
+      ) {
+        texts.push(content.text.trim());
+      }
+    }
+  }
+
+  transcript = texts.join(" ").trim();
+}
+
+// Format alternatif jika response langsung mempunyai text
+if (!transcript && typeof data?.text === "string") {
+  transcript = data.text.trim();
+}
+
+// Format alternatif response nested
+if (
+  !transcript &&
+  typeof data?.response?.text === "string"
+) {
+  transcript = data.response.text.trim();
+}
+
+console.log("FINAL TRANSCRIPT:", transcript);
+
+if (!transcript) {
+  throw new Error(
+    "Gemini menerima audio tetapi tidak mengembalikan teks transkrip. Periksa response Gemini pada log deployment."
+  );
+}
 
   // ============================================================
   // FALLBACK
