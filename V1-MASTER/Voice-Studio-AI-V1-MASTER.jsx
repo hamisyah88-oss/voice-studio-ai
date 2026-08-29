@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+
 import {
   Mic, Play, Pause, Download, Volume2, Sparkles, RefreshCw, Trash2, Heart,
   Plus, Folder, History, Settings, Copy, Check, Sliders, User, Info, FileText,
@@ -504,6 +504,8 @@ export default function App() {
   const estDurationFormatted = `${Math.floor(estimatedSeconds / 60).toString().padStart(2, '0')}:${(estimatedSeconds % 60).toString().padStart(2, '0')}`;
 
   // Gemini TTS Call Function with Retry Strategy
+  // Gemini TTS is called through the secure Next.js server route.
+  // The Gemini API key is NEVER exposed to the browser.
   const handleGenerateVoice = async () => {
     if ((!isMultiSpeaker && !script.trim()) || (isMultiSpeaker && !multiScript.trim())) {
       showToast("Naskah tidak boleh kosong!");
@@ -513,105 +515,72 @@ export default function App() {
     setIsGenerating(true);
     setLoadingText("Memproses instruksi & karakter suara...");
 
-    const apiKey = ""; // Built-in runtime API Key
     const activeVoice = selectedVoiceObj.geminiVoice;
+    const rawText = isMultiSpeaker ? multiScript : script;
+    const cleanText = rawText
+      .replace(/\[(happy|serious|calm|excited|whispers|pause|slow|dramatic|cheerful|warm)\]/gi, " ")
+      .trim();
 
-    // Clean director tags from raw script text if standard single speaker
-    let rawText = isMultiSpeaker ? multiScript : script;
-    let cleanText = rawText.replace(/\[(happy|serious|calm|excited|whispers|pause|slow|dramatic|cheerful|warm)\]/gi, ' ').trim();
-    
-    // Construct Director Prompt Header
     let directorContext = `Style: ${style}. Emotion: ${emotion}. Speed: ${speed}x. Pitch: ${pitch}. Volume: ${volume}%.`;
     if (aiNotes) {
       directorContext += ` Director Notes: ${aiNotes.notes}`;
     }
 
-    const fullPrompt = `[Voice Over Context: ${directorContext}]\n\n${cleanText}`;
-
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
-
     let generatedWavBlob = null;
     let isDemoAudio = false;
 
-    // Retries up to 2 times
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 2 && !generatedWavBlob; attempt++) {
       try {
         setLoadingText(`Generating audio via Gemini TTS (Percobaan ${attempt + 1})...`);
-        
-        let payload;
-        if (isMultiSpeaker) {
-          const spk1Obj = VOICE_PRESETS.find(v => v.id === speaker1Voice) || VOICE_PRESETS[0];
-          const spk2Obj = VOICE_PRESETS.find(v => v.id === speaker2Voice) || VOICE_PRESETS[8];
 
-          payload = {
-            contents: [{ parts: [{ text: multiScript }] }],
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                multiSpeakerVoiceConfig: {
-                  speakerVoiceConfigs: [
-                    { speaker: "GURU", voiceConfig: { prebuiltVoiceConfig: { voiceName: spk1Obj.geminiVoice } } },
-                    { speaker: "SISWA", voiceConfig: { prebuiltVoiceConfig: { voiceName: spk2Obj.geminiVoice } } }
-                  ]
-                }
-              }
-            },
-            model: "gemini-2.5-flash-preview-tts"
-          };
-        } else {
-          payload = {
-            contents: [{ parts: [{ text: fullPrompt }] }],
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: activeVoice }
-                }
-              }
-            },
-            model: "gemini-2.5-flash-preview-tts"
-          };
-        }
+        const payload = isMultiSpeaker
+          ? {
+              text: multiScript,
+              multiSpeaker: true,
+              speaker1Voice: (VOICE_PRESETS.find(v => v.id === speaker1Voice) || VOICE_PRESETS[0]).geminiVoice,
+              speaker2Voice: (VOICE_PRESETS.find(v => v.id === speaker2Voice) || VOICE_PRESETS[8]).geminiVoice,
+            }
+          : {
+              text: cleanText,
+              multiSpeaker: false,
+              voiceName: activeVoice,
+              style,
+              emotion,
+              speed,
+              pitch,
+              volume,
+              directorContext,
+            };
 
-        const res = await fetch(endpoint, {
+        const res = await fetch("/api/gemini-tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
         });
 
-        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
-
-        const data = await res.json();
-        const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-
-        if (base64Audio) {
-          let sampleRate = 24000;
-          const mime = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType;
-          if (mime) {
-            const m = mime.match(/rate=(\d+)/i);
-            if (m && m[1]) sampleRate = parseInt(m[1], 10);
-          }
-          generatedWavBlob = pcmToWav(base64Audio, sampleRate);
-          break;
+        if (!res.ok) {
+          const detail = await res.text();
+          throw new Error(detail || `HTTP ${res.status}`);
         }
+
+        const contentType = res.headers.get("content-type") || "";
+        if (!contentType.includes("audio/")) {
+          const detail = await res.text();
+          throw new Error(detail || "Server tidak mengembalikan audio.");
+        }
+
+        generatedWavBlob = await res.blob();
       } catch (err) {
-        console.warn("Gemini API call failed, trying backup:", err);
+        console.warn("Gemini TTS attempt failed:", err);
+        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 700));
       }
     }
 
-    // Fallback if API key is not ready or failed
+    // Keep the existing local demo fallback so the UI never becomes unusable.
     if (!generatedWavBlob) {
       isDemoAudio = true;
       setLoadingText("Menggunakan Mode Studio fallback lokal...");
       generatedWavBlob = generateSyntheticDemoWav(cleanText, speed);
-
-      // Trigger SpeechSynthesis for natural sound playback alongside fallback blob
-      if ('speechSynthesis' in window) {
-        const utter = new SpeechSynthesisUtterance(cleanText.substring(0, 150));
-        utter.rate = speed;
-        utter.lang = 'id-ID';
-        window.speechSynthesis.speak(utter);
-      }
     }
 
     const audioUrl = URL.createObjectURL(generatedWavBlob);
@@ -622,34 +591,37 @@ export default function App() {
       title: titleExcerpt,
       voiceName: isMultiSpeaker ? "Multi-Speaker (Guru & Siswa)" : selectedVoiceObj.name,
       geminiVoice: activeVoice,
-      style: style,
+      style,
       duration: estDurationFormatted,
       blob: generatedWavBlob,
       url: audioUrl,
-      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      isDemo: isDemoAudio
+      createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      isDemo: isDemoAudio,
     };
 
     setCurrentAudio(newAudioObj);
     setIsGenerating(false);
 
-    // Save automatically to history
     setHistory(prev => [
       {
         id: newAudioObj.id,
         title: titleExcerpt,
         voiceName: newAudioObj.voiceName,
         geminiVoice: activeVoice,
-        style: style,
+        style,
         duration: estDurationFormatted,
         date: "Baru Saja",
         favorite: false,
-        audioUrl: audioUrl
+        audioUrl: audioUrl,
       },
-      ...prev
+      ...prev,
     ]);
 
-    showToast(isDemoAudio ? "Audio berhasil dibuat (Demo Studio)!" : "Voice Over berhasil digenerate via Gemini!");
+    showToast(
+      isDemoAudio
+        ? "Gemini belum merespons. Audio Demo Studio dibuat."
+        : "Voice Over berhasil digenerate via Gemini!"
+    );
   };
 
   // Preview Voice Function
