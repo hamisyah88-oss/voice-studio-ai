@@ -1,13 +1,14 @@
 
 "use client";
 
-import { useState } from "react";import {
+import { useState, useRef } from "react";
+import {
   Mic, Play, Pause, Download, Volume2, Sparkles, RefreshCw, Trash2, Heart,
   Plus, Folder, History, Settings, Copy, Check, Sliders, User, Info, FileText,
   ChevronRight, X, Music, Layers, BookOpen, Layers2, Sparkle, Search, CheckCircle2,
   Upload, Square, AudioLines, Wand2,
   AlertCircle, Share2, CornerDownRight, VolumeX, FastForward, RotateCcw
-} from 'lucide-react';
+} from "lucide-react";
 
 // ==========================================
 // CENTRALIZED VOICE MAPPING CONFIGURATION
