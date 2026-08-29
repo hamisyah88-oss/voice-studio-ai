@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+const TRANSCRIBE_MODEL = "gemini-2.5-flash";
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
 // UI labels are intentionally decoupled from provider voice names.
@@ -109,7 +109,11 @@ export async function POST(req: Request) {
 
     // Step 1: speech-to-text. The audio is converted to text first because
     // Gemini TTS is a text-to-audio model, not a direct voice-cloning model.
-  const transcriptResponse = await fetch(
+  // Step 1: Speech-to-text
+// Gunakan Gemini Flash untuk membaca audio.
+// Audio dikirim langsung sebagai base64 inlineData.
+
+const transcriptResponse = await fetch(
   `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
   {
     method: "POST",
@@ -121,7 +125,7 @@ export async function POST(req: Request) {
         {
           parts: [
             {
-              text: "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan informasi yang tidak ada dalam audio.",
+              text: "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan. Gunakan tanda baca yang wajar. Jangan menambahkan, mengurangi, atau mengubah makna ucapan.",
             },
             {
               inlineData: {
@@ -132,9 +136,13 @@ export async function POST(req: Request) {
           ],
         },
       ],
+      generationConfig: {
+        temperature: 0,
+      },
     }),
   }
 );
+
 if (!transcriptResponse.ok) {
   const errorText = await transcriptResponse.text();
 
@@ -151,6 +159,20 @@ if (!transcriptResponse.ok) {
 }
 
 const transcriptData = await transcriptResponse.json();
+
+console.log(
+  "GEMINI TRANSCRIPTION RESPONSE:",
+  JSON.stringify(transcriptData, null, 2)
+);
+
+const transcript = extractText(transcriptData);
+
+if (!transcript) {
+  return jsonError(
+    "Ucapan tidak berhasil dikenali. Coba rekam atau upload audio yang lebih jelas.",
+    422
+  );
+}
 const transcript = extractText(transcriptData);
 
 if (!transcript) {
@@ -163,7 +185,7 @@ if (!transcript) {
     const ttsPrompt = `Bacakan teks berikut dalam bahasa Indonesia. ${target.direction}. Pertahankan isi dan urutan kata. Jangan menambahkan kata pembuka atau penutup. Jangan menyanyikan teks.\n\nTeks:\n${transcript}`;
 
     const ttsResponse = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TRANSCRIBE_MODEL}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
