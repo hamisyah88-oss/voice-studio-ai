@@ -1,5 +1,7 @@
 
-import {
+"use client";
+
+import { useState } from "react";import {
   Mic, Play, Pause, Download, Volume2, Sparkles, RefreshCw, Trash2, Heart,
   Plus, Folder, History, Settings, Copy, Check, Sliders, User, Info, FileText,
   ChevronRight, X, Music, Layers, BookOpen, Layers2, Sparkle, Search, CheckCircle2,
