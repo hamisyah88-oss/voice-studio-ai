@@ -123,8 +123,8 @@ export async function POST(req: Request) {
                     "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
                 },
                 {
-                  inline_data: {
-                    mime_type: mimeType,
+                 inlineData: {
+                    mimeType: mimeType,
                     data: base64Audio,
                   },
                 },
