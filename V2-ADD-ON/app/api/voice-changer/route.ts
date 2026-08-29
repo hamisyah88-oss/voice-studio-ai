@@ -165,19 +165,21 @@ console.log(
   JSON.stringify(transcriptData, null, 2)
 );
 
-const transcript = extractText(transcriptData);
+const transcriptData = await transcriptResponse.json();
+
+console.log(
+  "GEMINI TRANSCRIPTION RESPONSE:",
+  JSON.stringify(transcriptData, null, 2)
+);
+
+const transcript = transcriptData?.candidates?.[0]?.content?.parts
+  ?.map((part: { text?: string }) => part.text || "")
+  .join("")
+  .trim();
 
 if (!transcript) {
   return jsonError(
     "Ucapan tidak berhasil dikenali. Coba rekam atau upload audio yang lebih jelas.",
-    422
-  );
-}
-const transcript = extractText(transcriptData);
-
-if (!transcript) {
-  return jsonError(
-    "Ucapan tidak berhasil dikenali. Coba rekam ulang dengan suara yang lebih jelas.",
     422
   );
 }
