@@ -1,4 +1,6 @@
+"use client";
 
+import { useState, useRef } from "react";
 import {
   Mic, Play, Pause, Download, Volume2, Sparkles, RefreshCw, Trash2, Heart,
   Plus, Folder, History, Settings, Copy, Check, Sliders, User, Info, FileText,
