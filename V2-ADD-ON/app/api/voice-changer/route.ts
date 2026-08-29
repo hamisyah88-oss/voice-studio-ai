@@ -138,8 +138,13 @@ export async function POST(req: Request) {
 if (!transcriptResponse.ok) {
   const errorText = await transcriptResponse.text();
 
+  console.error("GEMINI TRANSCRIPTION ERROR:", {
+    status: transcriptResponse.status,
+    response: errorText,
+  });
+
   return jsonError(
-    "Audio tidak dapat dibaca oleh Gemini.",
+    `Gemini gagal membaca audio (${transcriptResponse.status}).`,
     transcriptResponse.status,
     errorText
   );
