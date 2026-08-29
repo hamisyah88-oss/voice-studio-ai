@@ -105,7 +105,7 @@ export async function POST(req: Request) {
 
     const arrayBuffer = await audio.arrayBuffer();
     const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-    const mimeType = audio.type || "audio/wav";
+   const mimeType = (audio.type || "audio/wav").split(";")[0].toLowerCase();
 
     // Step 1: speech-to-text. The audio is converted to text first because
     // Gemini TTS is a text-to-audio model, not a direct voice-cloning model.
@@ -116,24 +116,24 @@ export async function POST(req: Request) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [
-            {
-              parts: [
-                {
-                  text:
-                    "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
-                },
-                {
-                 inlineData: {
-                    mimeType: mimeType,
-                    data: base64Audio,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
-      }
-    );
+         contents: [
+  {
+    parts: [
+      {
+        text:
+          "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
+      },
+      {
+        inline_data: {
+          mime_type: mimeType,
+          data: base64Audio,
+        },
+         },
+      ],
+      },
+    ],
+  }),
+);
 
     if (!transcriptResponse.ok) {
       return jsonError(
