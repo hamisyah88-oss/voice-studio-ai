@@ -210,16 +210,16 @@ async function uploadAudioToGemini(
     audioBuffer.byteLength
   );
 
-  const uploadResponse = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      "Content-Length": String(uploadBody.byteLength),
-      "X-Goog-Upload-Offset": "0",
-      "X-Goog-Upload-Command": "upload, finalize",
-      "Content-Type": mimeType,
-    },
-    body: uploadBody,
-  });
+ const uploadResponse = await fetch(uploadUrl, {
+  method: "POST",
+  headers: {
+    "Content-Length": String(audioBuffer.byteLength),
+    "X-Goog-Upload-Offset": "0",
+    "X-Goog-Upload-Command": "upload, finalize",
+    "Content-Type": mimeType,
+  },
+  body: audioBuffer as unknown as BodyInit,
+});
 
   if (!uploadResponse.ok) {
     const errorText = await uploadResponse.text();
