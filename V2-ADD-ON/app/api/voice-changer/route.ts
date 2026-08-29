@@ -114,28 +114,25 @@ export async function POST(req: Request) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-         contents: [
-  {
-    parts: [
-      {
-        text:
-          "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
-      },
-      {
-        inline_data: {
-          mime_type: mimeType,
-          data: base64Audio,
+      body: JSON.stringify({
+  contents: [
+    {
+      parts: [
+        {
+          text:
+            "Transkripsikan ucapan pada audio ini secara akurat dalam bahasa Indonesia. Pertahankan kata-kata yang diucapkan, tanda baca yang wajar, dan jangan menambahkan penjelasan, pembuka, atau komentar apa pun.",
         },
-         },
+        {
+          inlineData: {
+            mimeType: mimeType,
+            data: base64Audio,
+          },
+        },
       ],
-      },
-    ],
-  }),
-);
-
-    if (!transcriptResponse.ok) {
+    },
+  ],
+}),
+        if (!transcriptResponse.ok) {
       return jsonError(
         "Audio tidak dapat dibaca.",
         transcriptResponse.status,
