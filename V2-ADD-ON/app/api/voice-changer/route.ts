@@ -262,13 +262,27 @@ async function uploadToGeminiFiles(
 /**
  * Transkripsi audio menggunakan Gemini 3.5 Transcribe.
  */
+
+/**
+ * Transkripsi audio menggunakan Gemini 3.5 Transcribe
+ * melalui Interactions API.
+ *
+ * Ini digunakan khusus untuk speech-to-text agar hasil
+ * transkrip diambil langsung dari output_text.
+ */
 async function transcribeAudio(
   fileUri: string,
   mimeType: string,
   apiKey: string
 ) {
+  console.log("START GEMINI TRANSCRIPTION:", {
+    fileUri,
+    mimeType,
+    model: TRANSCRIBE_MODEL,
+  });
+
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TRANSCRIBE_MODEL}:generateContent`,
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
     {
       method: "POST",
 
@@ -278,69 +292,125 @@ async function transcribeAudio(
       },
 
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text:
-                  "Transkripsikan semua ucapan pada audio ini secara akurat. " +
-                  "Gunakan bahasa Indonesia sesuai ucapan asli. " +
-                  "Pertahankan kata-kata yang diucapkan dan jangan mengubah makna. " +
-                  "Gunakan tanda baca yang wajar. " +
-                  "Jangan menjelaskan audio. " +
-                  "Keluarkan hanya hasil transkripsi.",
-              },
+        model: TRANSCRIBE_MODEL,
 
-              {
-                fileData: {
-                  mimeType: mimeType,
-                  fileUri: fileUri,
-                },
-              },
-            ],
+        input: [
+          {
+            type: "audio",
+            uri: fileUri,
+            mime_type: mimeType,
           },
         ],
 
-        generationConfig: {
-          audioTranscriptionConfig: {
-            mode: "SMART",
+        generation_config: {
+          transcription_config: {
+            language_codes: ["id-ID"],
+
+            mode: "smart",
           },
         },
       }),
     }
   );
 
-  if (!response.ok) {
-    const errorText = await response.text();
+  const responseText = await response.text();
 
-    console.error("GEMINI TRANSCRIPTION ERROR:", {
-      status: response.status,
-      response: errorText,
-    });
+  console.log("GEMINI TRANSCRIPTION HTTP STATUS:", response.status);
+
+  if (!response.ok) {
+    console.error(
+      "GEMINI TRANSCRIPTION ERROR:",
+      responseText
+    );
 
     throw new Error(
-      `Gemini gagal membaca audio (${response.status}). ${errorText}`
+      `Gemini gagal membaca audio (${response.status}). ${responseText}`
     );
   }
 
-  const data = await response.json();
+  let data: any;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    console.error(
+      "GEMINI TRANSCRIPTION INVALID JSON:",
+      responseText
+    );
+
+    throw new Error(
+      "Gemini mengembalikan respons yang bukan JSON."
+    );
+  }
 
   console.log(
-    "GEMINI TRANSCRIPTION RESPONSE:",
+    "GEMINI INTERACTION RESPONSE:",
     JSON.stringify(data, null, 2)
   );
 
-  const transcript = extractGeminiText(data);
+  // ============================================================
+  // HASIL UTAMA — INTERACTIONS API
+  // ============================================================
+
+  let transcript =
+    typeof data?.output_text === "string"
+      ? data.output_text.trim()
+      : "";
+
+  // ============================================================
+  // FALLBACK
+  // ============================================================
+
+  if (!transcript && Array.isArray(data?.outputs)) {
+    transcript = data.outputs
+      .map((item: any) => {
+        if (typeof item?.text === "string") {
+          return item.text;
+        }
+
+        if (Array.isArray(item?.content)) {
+          return item.content
+            .map((part: any) => part?.text || "")
+            .join(" ");
+        }
+
+        return "";
+      })
+      .join(" ")
+      .trim();
+  }
+
+  // ============================================================
+  // FALLBACK TAMBAHAN JIKA RESPONSE BERBENTUK CANDIDATES
+  // ============================================================
+
+  if (!transcript && Array.isArray(data?.candidates)) {
+    transcript = data.candidates
+      .flatMap(
+        (candidate: any) =>
+          candidate?.content?.parts || []
+      )
+      .map(
+        (part: any) =>
+          part?.text || ""
+      )
+      .join(" ")
+      .trim();
+  }
+
+  console.log(
+    "FINAL TRANSCRIPT:",
+    transcript
+  );
 
   if (!transcript) {
     throw new Error(
-      "Gemini menerima audio tetapi transkrip kosong."
+      "Gemini menerima audio tetapi transkrip kosong. Periksa response Gemini pada log deployment."
     );
   }
 
   return transcript;
 }
-
 /**
  * Generate suara baru berdasarkan transcript.
  */
